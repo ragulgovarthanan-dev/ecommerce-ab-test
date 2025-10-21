@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""
+AB Test Workflow
+- Supports aggregated CSV with columns: group, visitors, conversions
+- Supports row-level CSV with columns: user_id (optional), group, converted (0/1)
+Produces:
+- Console summary
+- Two-proportion z-test result and interpretation
+- Confidence interval plot saved to outputs/confidence_interval.png
+"""
+
+import os
+import argparse
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from statsmodels.stats.proportion import proportions_ztest, proportion_confint
+from scipy import stats
+
+sns.set(style="whitegrid")
+
+
+def load_data(path: str) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    return df
+
+
+def is_aggregate(df: pd.DataFrame) -> bool:
+    # aggregate if it has 'visitors' and 'conversions' columns
+    return {"group", "visitors", "conversions"}.issubset(set(df.columns))
+
+
+def aggregate_from_rows(df: pd.DataFrame) -> pd.DataFrame:
+    # Expect row-level with 'group' and 'converted' (0/1)
+    if "converted" not in df.columns:
+        raise ValueError("Row-level data must include 'converted' column (0/1).")
+    agg = df.groupby("group").agg(
+        visitors=("converted", "count"),
+        conversions=("converted", "sum")
+    ).reset_index()
+    return agg
+
+
+def summarize(agg: pd.DataFrame):
+    agg["conversion_rate"] = 100 * agg["conversions"] / agg["visitors"]
+    print("\nData Summary\n")
+    print(agg.to_string(index=False))
+    return agg
+
+
+def two_proportion_test(agg: pd.DataFrame, control_label=None, treat_label=None, alternative="larger"):
+    # Identify control and treatment rows
+    if control_label is None or treat_label is None:
+        # assume first is control, second is treatment
+        control, treatment = agg.iloc[0], agg.iloc[1]
+    else:
+        control = agg[agg["group"] == control_label].iloc[0]
+        treatment = agg[agg["group"] == treat_label].iloc[0]
+
+    counts = np.array([int(control["conversions"]), int(treatment["conversions"])])
+    nobs = np.array([int(control["visitors"]), int(treatment["visitors"])])
+
+    stat, pval = proportions_ztest(counts, nobs, alternative=alternative)
+    print("\nTwo-Proportion Z-Test")
+    print(f"Control conversions: {counts[0]} / {nobs[0]} ({100*counts[0]/nobs[0]:.3f}%)")
+    print(f"Treatment conversions: {counts[1]} / {nobs[1]} ({100*counts[1]/nobs[1]:.3f}%)")
+    print(f"z-stat = {stat:.4f}, p-value = {pval:.6g}")
+    return {"z": stat, "pvalue": pval, "counts": counts, "nobs": nobs, "control": control, "treatment": treatment}
+
+
+def confidence_intervals(agg: pd.DataFrame, alpha=0.05):
+    cis = {}
+    for _, row in agg.iterrows():
+        c, n = int(row["conversions"]), int(row["visitors"])
+        low, high = proportion_confint(count=c, nobs=n, alpha=alpha, method='wilson')
+        cis[row["group"]] = (low, high, c/n)
+    return cis
+
+
+def plot_confidence_intervals(cis: dict, outpath: str):
+    groups = list(cis.keys())
+    rates = [cis[g][2] for g in groups]
+    lows = [cis[g][0] for g in groups]
+    highs = [cis[g][1] for g in groups]
+
+    # convert to percentages
+    rates_pct = [r * 100 for r in rates]
+    lows_pct = [l * 100 for l in lows]
+    highs_pct = [h * 100 for h in highs]
+    errs_low = [r - l for r, l in zip(rates_pct, lows_pct)]
+    errs_high = [h - r for r, h in zip(highs_pct, rates_pct)]
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.errorbar(groups, rates_pct, yerr=[errs_low, errs_high], fmt='o', capsize=6, color='C0')
+    ax.set_ylabel("Conversion rate (%)")
+    ax.set_title("Conversion Rate with 95% CI")
+    for i, g in enumerate(groups):
+        ax.text(i, rates_pct[i] + 0.02, f"{rates_pct[i]:.2f}%", ha='center')
+    plt.tight_layout()
+    os.makedirs(outpath, exist_ok=True)
+    out_file = os.path.join(outpath, "confidence_interval.png")
+    fig.savefig(out_file, dpi=150)
+    plt.close(fig)
+    print(f"Saved confidence interval plot to {out_file}")
+
+
+def chi_square_test_row_level(df: pd.DataFrame, var_col: str, group_col: str = "group"):
+    """
+    Example: test whether device type affects conversion.
+    df must have categorical var_col and group_col.
+    """
+    contingency = pd.crosstab(df[group_col], df[var_col])
+    chi2, p, dof, expected = stats.chi2_contingency(contingency)
+    print("\nChi-Square Test")
+    print("Contingency table:")
+    print(contingency)
+    print(f"chi2 = {chi2:.4f}, p = {p:.6g}, dof = {dof}")
+    return {"chi2": chi2, "p": p, "dof": dof, "expected": expected}
+
+
+def t_test_duration(row_df: pd.DataFrame, duration_col: str = "session_duration", group_col: str = "group"):
+    """
+    Example: if you have continuous metric session_duration and want to compare means across groups.
+    """
+    groups = row_df[group_col].unique()
+    if len(groups) != 2:
+        raise ValueError("t-test function expects exactly 2 groups.")
+    g1, g2 = groups
+    data1 = row_df[row_df[group_col] == g1][duration_col].dropna()
+    data2 = row_df[row_df[group_col] == g2][duration_col].dropna()
+    tstat, pval = stats.ttest_ind(data1, data2, equal_var=False)  # Welch's t-test
+    print("\nT-Test (session duration)")
+    print(f"{g1}: n={len(data1)}, mean={data1.mean():.3f}, sd={data1.std():.3f}")
+    print(f"{g2}: n={len(data2)}, mean={data2.mean():.3f}, sd={data2.std():.3f}")
+    print(f"t-stat = {tstat:.4f}, p-value = {pval:.6g}")
+    return {"tstat": tstat, "pvalue": pval}
+
+
+def interpret_ztest(result: dict, alpha=0.05):
+    z, p = result["z"], result["pvalue"]
+    if p < alpha:
+        print("\nInterpretation: p < {:.3f} — reject H0
