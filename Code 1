@@ -1,0 +1,31 @@
+# ecommerce-ab-test
+
+A ready-to-run A/B testing analysis repository for an e-commerce conversion rate test.
+
+Contents:
+- analysis/ab_test_workflow.py — main analysis workflow (two-proportion z-test, confidence intervals, visualizations)
+- data/ab_test_data.csv — sample aggregate dataset (Control and Treatment)
+- requirements.txt — Python dependencies
+- LICENSE — MIT license
+
+Quick start:
+1. Create a Python virtual environment and install dependencies:
+   python -m venv .venv
+   source .venv/bin/activate   # (or .venv\Scripts\activate on Windows)
+   pip install -r requirements.txt
+
+2. Run the analysis:
+   python analysis/ab_test_workflow.py --data data/ab_test_data.csv --output outputs
+
+This script supports both aggregate CSV (group, visitors, conversions) and row-level CSVs (user_id, group, converted), and will auto-detect the format.
+
+Summary of what the workflow does:
+- Load dataset (aggregated or row-level)
+- Print group summary (visitors, conversions, conversion rate)
+- Run two-proportion z-test with interpretation
+- Compute and visualize 95% confidence intervals for conversion rates
+- Include example code for Chi-square (categorical relationships) and t-test for continuous metrics
+
+Notes:
+- Always verify test assumptions (independence, sample size, normal approximation, equal variances for t-test).
+- This repo is intended to be a template — feel free to expand with further automation, CI, or notebooks.
